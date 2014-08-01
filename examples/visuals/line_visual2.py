@@ -57,23 +57,82 @@ stub3 = Function("vec4 stub3(vec3 value) { return value; }")
 
 ## Actual code
 
-class Line(Visual):
+
+
+from vispy.scene.shaders.function import Compiler
+
+class NewVisual(Visual):
+    """ Demonstrate what this would look like if the base Visual class would
+    take care of the boilerplate of working with Functions.
+    """
+    
+    _vert_code = "void main() {}"
+    _vert_code = "void main() {}"
+    
+    def __init__(self, *args, **kwargs):
+        Visual.__init__(self, *args, **kwargs)
+        
+        # Create program
+        self._program = gloo.Program('', '')
+        
+        # Create Functions
+        self._vert = Function(self._vert_code)
+        self._frag = Function(self._vert_code)
+        self._vert.changed.connect(self._source_changed)
+        self._frag.changed.connect(self._source_changed)
+        
+        # Cache state of Variables so we know which ones require update
+        self._variable_state = {}
+    
+    def _source_changed(self, ev):
+        self._need_build = True
+    
+    def draw(self, event=None):
+        if self._need_build:
+            self._need_build = False
+            
+            self._compiler = Compiler(vert=self._vert, frag=self._frag)
+            code = self._compiler.compile()
+            self._program.shaders[0].code = code['vert']
+            self._program.shaders[1].code = code['frag']
+            self._program._create_variables()
+            self._variable_state = {}
+            #logger.debug('==== Vertex Shader ====\n\n' + code['vert'] + "\n")
+            #logger.debug('==== Fragment shader ====\n\n' + code['frag'] + "\n")
+        
+        if True:
+            # todo: (even if we do this via a Program) would be nice not
+            # to have to iterate over all dependencies each draw
+            
+            # set all variables
+            settable_vars = 'attribute', 'uniform'
+            #logger.debug("Apply variables:")
+            deps = self._vert.dependencies() + self._frag.dependencies()
+            for dep in deps:
+                if not isinstance(dep, Variable) or dep.vtype not in settable_vars:
+                    continue
+                name = self._compiler[dep]
+                #logger.debug("    %s = %s" % (name, dep.value))
+                state_id = dep.state_id
+                if self._variable_state.get(name, None) != state_id:
+                    self._program[name] = dep.value
+                    self._variable_state[name] = state_id
+
+
+class Line(NewVisual):
     
     def __init__(self, parent, data, color=None):
-        Visual.__init__(self, parent)
-        
-        # Create a program
-        self._program = ModularProgram(vertex_template, fragment_template)
+        NewVisual.__init__(self, parent)
         
         # Define how we are going to specify position and color
-        self._program.vert['gl_Position'] = '$transform(vec4($position, 1.0))'
-        self._program.frag['gl_FragColor'] = 'vec4($color, 1.0)'
+        self._vert['gl_Position'] = '$transform(vec4($position, 1.0))'
+        self._frag['gl_FragColor'] = 'vec4($color, 1.0)'
         
         # Set position data
         vbo = gloo.VertexBuffer(data)
-        self._program.vert['position'] = vbo
+        self._vert['position'] = vbo
         
-        self._program.vert['transform'] = self.transform.shader_map()
+        self._vert['transform'] = self.transform.shader_map()
         
         # Create some variables related to color. We use a combination
         # of these depending on the kind of color being set.
@@ -94,13 +153,13 @@ class Line(Visual):
     # todo: this should probably be handled by base visual class..
     @transform.setter
     def transform(self, tr):
-        self._program.vert['transform'] = tr.shader_map()
+        self._vert['transform'] = tr.shader_map()
         Visual.transform.fset(self, tr)
     
     def set_data(self, data):
         """ Set the vertex data for this line.
         """
-        vbo = self._program.vert['position'].value
+        vbo = self._vert['position'].value
         vbo.set_data(data)
     
     def set_color(self, color):
@@ -117,22 +176,23 @@ class Line(Visual):
             color = [float(v) for v in color]
             assert len(color) == 3
             self._color_var.value = color
-            self._program.frag['color'] = self._color_var
+            self._frag['color'] = self._color_var
         elif isinstance(color, np.ndarray):
             # A value per vertex, via a VBO
             assert color.shape[1] == 3
             self._colors_var.value.set_data(color)
-            self._program.frag['color'] = self._color_varying
-            self._program.vert[self._color_varying] = self._colors_var
+            self._frag['color'] = self._color_varying
+            self._vert[self._color_varying] = self._colors_var
         else:
             raise ValueError('Line colors must be Nx3 array or color tuple')
     
     def draw(self, event=None):
+        NewVisual.draw(self, event)
         gloo.set_state(blend=True, blend_func=('src_alpha', 'one'))
         
         # Draw
         self._program.draw('line_strip')
-
+    
 
 class DashedLine(Line):
     """ This takes the Line and modifies the composition of Functions
@@ -142,10 +202,10 @@ class DashedLine(Line):
         Line.__init__(self, *args, **kwargs)
         
         dasher = Function(dash_template) 
-        self._program.frag['gl_FragColor.a'] = dasher()
+        self._frag['gl_FragColor.a'] = dasher()
         dasher['distance'] = Varying('v_distance', dtype='float')
         dasher['dash_len'] = Variable('const float dash_len 0.001')
-        self._program.vert[dasher['distance']] = 'gl_Position.x'
+        self._vert[dasher['distance']] = 'gl_Position.x'
 
 
 ## Show the visual
