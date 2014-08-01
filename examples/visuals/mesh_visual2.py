@@ -64,6 +64,61 @@ stub3 = Function("vec4 stub3(vec3 value) { return value; }")
 
 ## Actual code
 
+class SuperVariable4(object):
+    """ Provides an easy way to bring vec4 data into a shader
+    
+    This class takes care of carying attribute data from vertex to
+    fragment shader via a varying, and the conversion of float/vec2/vec3
+    data to vec4 data.
+    """
+    
+    _code1 = 'vec4 val1to4(float val) { return vec4(val, 0.0, 0.0, 1.0);}'
+    _code2 = 'vec4 val2to4(vec2 val) { return vec4(val, 0.0, 1.0);}'
+    _code3 = 'vec4 val3to4(vec3 val) { return vec4(val, 1.0);}'
+    _code4 = 'vec4 stub4(vec4 val) { return val;}'
+    
+    def __init__(self, name, value=None, n=4):
+        self._variable = Variable(name) 
+        self._varying = Varying('a_' + name)
+        self._varying.link(self._variable)
+        
+        # Define proxies
+        self._proxies = {}
+        self._proxies['float'] = Function(self._code1)
+        self._proxies['vec2'] = Function(self._code2)
+        self._proxies['vec3'] = Function(self._code3)
+        self._proxies['vec4'] = Function(self._code4)
+        # Turn into FunctionCall objects
+        for key, val in self._proxies.items():
+            if val.name.startswith('stub'):
+                val = lambda x:x
+            self._proxies[key] = val(self._variable), val(self._varying)
+        
+        if value is not None:
+            self.value = value
+    
+    @property
+    def value(self):
+        return self._variable.value
+    
+    @value.setter
+    def value(self, value):
+        self._variable.value = value
+    
+    
+    def apply(self, fun1, fun2=None):
+        """ Apply this variable. If one function object is given, simply
+        applies the value to that. If two are given, they are considered
+        vertex and fragment shader, and a varying is used to communicate the
+        value between the two.
+        """
+        name, dtype = self._variable.name, self._variable.dtype
+        if fun2 is None:
+            fun1[name] = self._proxies[dtype][0]
+        else:
+            fun2[name] = self._proxies[dtype][1]
+            fun1[self._varying] = self._proxies[dtype][0]
+
 
 class Mesh(Visual):
     
@@ -78,15 +133,8 @@ class Mesh(Visual):
         self._program.vert['gl_Position'] = 'vec4($position, 1.0)'
         self._program.frag['gl_FragColor'] = '$light($color)'
         
-        # Define variables related to color. Only one is in use at all times
-        self._variables = {}
-        self._variables['u_color3'] = Variable('uniform vec3 u_color')
-        self._variables['u_color4'] = Variable('uniform vec4 u_color')
-        self._variables['a_color3'] = Variable('attribute vec3 a_color')
-        self._variables['a_color4'] = Variable('attribute vec4 a_color')
-        
-        # Set color to a varying
-        self._program.frag['color'] = Varying('v_color')
+        # Define variable related to color
+        self._colorvar = SuperVariable4('color')
         
         # Init
         self.shading = 'plain'
@@ -116,19 +164,12 @@ class Mesh(Visual):
         # todo: we may want to clear any color vertex buffers
         
         if isinstance(values, tuple):
-            # Single value (via a uniform)
-            values = [float(v) for v in values]
-            if len(values) == 3:
-                variable = self._variables['u_color3']
-                variable.value = values
-                self._program.frag['color'] = color3to4(variable)
-            elif len(values) == 4:
-                variable = self._variables['u_color4']
-                variable.value = values
-                self._program.frag['color'] = variable
-            else:
+            if len(values) not in (3, 4):
                 raise ValueError('Color tuple must have 3 or 4 values.')
-        
+            # Single value (via a uniform)
+            self._colorvar.value = [float(v) for v in values]
+            self._colorvar.apply(self._program.frag)
+            
         elif isinstance(values, np.ndarray):
             # A value per vertex, via a VBO
             
@@ -140,27 +181,20 @@ class Mesh(Visual):
                 # Look color up in a texture
                 raise NotImplementedError()
             
-            elif values.shape[1] == 3:
+            if values.shape[1] in (3, 4):
                 # Explicitly set color per vertex
-                varying = Varying('v_color')
-                self._program.frag['color'] = color3to4(varying)
-                variable = self._variables['a_color3']
-                variable.value = gloo.VertexBuffer(values)
-                self._program.vert[varying] = variable
-            
-            elif values.shape[1] == 4:
-                # Explicitly set color per vertex
-                # Fragment shader
-                varying = Varying('v_color')
-                self._program.frag['color'] = varying
-                variable = self._variables['a_color4']
-                variable.value = gloo.VertexBuffer(values)
-                self._program.vert[varying] = variable
-            
+                if isinstance(self._colorvar.value, gloo.VertexBuffer):
+                    # todo: set_data should check whether this is allowed
+                    self._colorvar.value.set_data(values)
+                else:
+                    self._colorvar.value = gloo.VertexBuffer(values)
+                self._colorvar.apply(self._program.vert, self._program.frag)
             else:
                 raise ValueError('Mesh values must be NxM, with M 1,2,3 or 4.')
         else:
             raise ValueError('Mesh values must be NxM array or color tuple')
+        
+        print(self._program._need_build)
     
     @property
     def shading(self):
@@ -182,7 +216,7 @@ class Mesh(Visual):
             
         elif value == 'phong':
             assert self._normals is not None
-            # Apply phonmg function, 
+            # Apply phong function, 
             phong = Function(phong_template)
             self._program.frag['light'] = phong
             # Normal data comes via vertex shader
@@ -261,5 +295,6 @@ if __name__ == '__main__':
                 mesh.draw(self)
     
     c = Canvas()
+    m = c.meshes[0]
     c.show()
     app.run()

@@ -329,6 +329,10 @@ class DataBuffer(Buffer):
             data is actually uploaded to GPU memory.
             Asking explicitly for a copy will prevent this behavior.
         """
+        # todo: can we update data if different shape that is present now?
+        # if not, we should check that here. And provide a way to
+        # test this before calling set_data, so that we can efficiently
+        # reuse a VertexBuffer where possible ...
         if self.base is not None:
             raise ValueError("Cannot set data on a non-base buffer")
         else:
