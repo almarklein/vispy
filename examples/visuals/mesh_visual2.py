@@ -32,22 +32,7 @@ void main() {
 }
 """
 
-phong_template = """
-vec4 phong_shading(vec4 color) {
-    vec3 norm = normalize($normal.xyz);
-    vec3 light = normalize($light_dir.xyz);
-    float p = dot(light, norm);
-    p = (p < 0. ? 0. : p);
-    vec4 diffuse = $light_color * p;
-    diffuse.a = 1.0;
-    p = dot(reflect(light, norm), vec3(0,0,1));
-    if (p < 0.0) {
-        p = 0.0;
-    }
-    vec4 specular = $light_color * 5.0 * pow(p, 100.);
-    return color * ($ambient + diffuse) + specular;
-}
-"""
+
 
 ## Functions that can be used as is (don't have template variables)
 # Consider these stored in a central location in vispy ...
@@ -64,60 +49,111 @@ stub3 = Function("vec4 stub3(vec3 value) { return value; }")
 
 ## Actual code
 
-class SuperVariable4(object):
-    """ Provides an easy way to bring vec4 data into a shader
+
+class Component(object):
+    """ Experiment for new style component. 
+    """
+    def __init__(self, name, vert, frag):
+        self._vert = vert
+        self._frag = frag
     
-    This class takes care of carying attribute data from vertex to
-    fragment shader via a varying, and the conversion of float/vec2/vec3
-    data to vec4 data.
+    def apply(self):
+        raise NotImplementedError()
+
+
+class Vec4Component(Component):
+    """ This component brings a vec4 value to the fragment shader.
+    
+    It takes care of converting vec3 data to vec4 if needed. It can be 
+    useful for color or position data.
     """
     
-    _code1 = 'vec4 val1to4(float val) { return vec4(val, 0.0, 0.0, 1.0);}'
-    _code2 = 'vec4 val2to4(vec2 val) { return vec4(val, 0.0, 1.0);}'
     _code3 = 'vec4 val3to4(vec3 val) { return vec4(val, 1.0);}'
-    _code4 = 'vec4 stub4(vec4 val) { return val;}'
     
-    def __init__(self, name, value=None, n=4):
+    def __init__(self, name, vert, frag):
+        Component.__init__(self, name, vert, frag)
+        
+        # Define variable and varying
         self._variable = Variable(name) 
         self._varying = Varying('a_' + name)
         self._varying.link(self._variable)
         
         # Define proxies
-        self._proxies = {}
-        self._proxies['float'] = Function(self._code1)
-        self._proxies['vec2'] = Function(self._code2)
-        self._proxies['vec3'] = Function(self._code3)
-        self._proxies['vec4'] = Function(self._code4)
-        # Turn into FunctionCall objects
-        for key, val in self._proxies.items():
-            if val.name.startswith('stub'):
-                val = lambda x:x
-            self._proxies[key] = val(self._variable), val(self._varying)
-        
-        if value is not None:
-            self.value = value
+        self._variable3 = Function(self._code3)(self._variable)
+        self._varying3 = Function(self._code3)(self._varying)
     
-    @property
-    def value(self):
-        return self._variable.value
-    
-    @value.setter
-    def value(self, value):
-        self._variable.value = value
-    
-    
-    def apply(self, fun1, fun2=None):
-        """ Apply this variable. If one function object is given, simply
-        applies the value to that. If two are given, they are considered
-        vertex and fragment shader, and a varying is used to communicate the
-        value between the two.
-        """
-        name, dtype = self._variable.name, self._variable.dtype
-        if fun2 is None:
-            fun1[name] = self._proxies[dtype][0]
+    def set_value(self, value):
+        if isinstance(value, (tuple, list)):
+            self._variable.value = value
+        elif isinstance(value, np.ndarray):
+            if isinstance(self._variable.value, gloo.VertexBuffer):
+                # todo: set_data should check whether this is allowed
+                self._variable.value.set_data(value)
+            else:
+                self._variable.value = gloo.VertexBuffer(value)
         else:
-            fun2[name] = self._proxies[dtype][1]
-            fun1[self._varying] = self._proxies[dtype][0]
+            raise ValueError('Invalid value type %r' % type(value))
+    
+    def apply(self):
+        name, dtype = self._variable.name, self._variable.dtype
+        if self._variable.dtype == 'uniform':
+            fragval = self._variable3 if dtype=='vec3' else self._variable
+            self._frag[name] = fragval
+        else:
+            fragval = self._varying3 if dtype=='vec3' else self._varying
+            self._vert[self._varying] = self._variable
+            self._frag[name] = fragval
+
+
+class PhongComponent(Component):
+    """ Component that applies ``vec4 phong_shading(vec4)``
+    to ``name`` in the given frag function.
+    
+    This components needs normal data set via ``set_normals``.
+    """
+    
+    _phong_template = """
+        vec4 phong_shading(vec4 color) {
+            vec3 norm = normalize($normal.xyz);
+            vec3 light = normalize($light_dir.xyz);
+            float p = dot(light, norm);
+            p = (p < 0. ? 0. : p);
+            vec4 diffuse = $light_color * p;
+            diffuse.a = 1.0;
+            p = dot(reflect(light, norm), vec3(0,0,1));
+            if (p < 0.0) {
+                p = 0.0;
+            }
+            vec4 specular = $light_color * 5.0 * pow(p, 100.);
+            return color * ($ambient + diffuse) + specular;
+        }
+        """
+
+    def __init__(self, name, vert, frag):
+        Component.__init__(self, name, vert, frag)
+        
+        # Create phong function
+        self._phong = Function(self._phong_template)
+        
+        self._phong['normal'] = Varying('v_normal')
+        
+        # Additional phong proprties
+        self._phong['light_dir'] = 'vec3(1.0, 1.0, 1.0)'
+        self._phong['light_color'] = 'vec4(1.0, 1.0, 1.0, 1.0)'
+        self._phong['ambient'] = 'vec4(0.3, 0.3, 0.3, 1.0)'
+    
+    def set_normals(self, normals):
+        # todo: we probably want a way to share the normal-VertexBuffer between
+        # all components that implement light. And we probably want to
+        # delete it from OpenGL when we don't need it...
+        if normals is None:
+            self._normalvar = None
+        else:
+            self._normalvar = Variable('a_normals', gloo.VertexBuffer(normals))
+    
+    def apply(self):
+        self._vert[self._phong['normal']] = self._normalvar
+        self._frag['light'] = self._phong
 
 
 class Mesh(Visual):
@@ -133,9 +169,11 @@ class Mesh(Visual):
         self._program.vert['gl_Position'] = 'vec4($position, 1.0)'
         self._program.frag['gl_FragColor'] = '$light($color)'
         
-        # Define variable related to color
-        self._colorvar = SuperVariable4('color')
-        
+        # Define components
+        self._color_comp = Vec4Component('color', self._program.vert, 
+                                       self._program.frag)
+        self._phong_comp = PhongComponent('light', self._program.vert, 
+                                          self._program.frag)
         # Init
         self.shading = 'plain'
         #
@@ -156,6 +194,7 @@ class Mesh(Visual):
     
     def set_normals(self, normals):
         self._normals = normals
+        self._phong_comp.set_normals(normals)
         self.shading = self.shading  # Update
     
     def set_values(self, values):
@@ -167,8 +206,8 @@ class Mesh(Visual):
             if len(values) not in (3, 4):
                 raise ValueError('Color tuple must have 3 or 4 values.')
             # Single value (via a uniform)
-            self._colorvar.value = [float(v) for v in values]
-            self._colorvar.apply(self._program.frag)
+            self._color_comp.set_value([float(v) for v in values])
+            self._color_comp.apply()
             
         elif isinstance(values, np.ndarray):
             # A value per vertex, via a VBO
@@ -183,12 +222,8 @@ class Mesh(Visual):
             
             if values.shape[1] in (3, 4):
                 # Explicitly set color per vertex
-                if isinstance(self._colorvar.value, gloo.VertexBuffer):
-                    # todo: set_data should check whether this is allowed
-                    self._colorvar.value.set_data(values)
-                else:
-                    self._colorvar.value = gloo.VertexBuffer(values)
-                self._colorvar.apply(self._program.vert, self._program.frag)
+                self._color_comp.set_value(values)
+                self._color_comp.apply()
             else:
                 raise ValueError('Mesh values must be NxM, with M 1,2,3 or 4.')
         else:
@@ -216,21 +251,12 @@ class Mesh(Visual):
             
         elif value == 'phong':
             assert self._normals is not None
-            # Apply phong function, 
-            phong = Function(phong_template)
-            self._program.frag['light'] = phong
-            # Normal data comes via vertex shader
-            phong['normal'] = Varying('v_normal')
-            var = gloo.VertexBuffer(self._normals)
-            self._program.vert[phong['normal']] = var
-            # Additional phong proprties
-            phong['light_dir'] = 'vec3(1.0, 1.0, 1.0)'
-            phong['light_color'] = 'vec4(1.0, 1.0, 1.0, 1.0)'
-            phong['ambient'] = 'vec4(0.3, 0.3, 0.3, 1.0)'
+            self._phong_comp.apply()
             # todo: light properties should be queried from the SubScene
             # instance.
     
     def draw(self, event):
+        
         # Draw
         self._program.draw('triangles', self._faces)
 
